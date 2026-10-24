@@ -15,9 +15,9 @@
 | HMI integration (menu entry, activation, context switch) | ✅ verified |
 | MMI controls (knob, touchpad) | ✅ verified |
 | Audio format negotiation over Wi-Fi | ✅ verified |
-| Media audio (music) | 🟡 audible, choppy — under investigation |
-| Calls / Siri / navigation prompts (Opus) | 🟡 session survives, no sound yet |
-| Microphone | ⬜ not started (needs Opus encoder) |
+| Media audio (music) | ✅ verified — continuous, no loss |
+| Calls / Siri / navigation prompts (Opus) | ✅ calls verified both ways; Siri and prompts to be checked |
+| Microphone | ✅ verified (far end hears the car's microphone) |
 | Instrument-cluster map stream | 🟡 frames decrypted, display not confirmed |
 | Automatic start / production packaging | ⬜ manual test script only |
 
@@ -80,8 +80,10 @@
 - HMI: CarPlay offered in the device list, single activation, automatic switch to the CarPlay context, return to the HMI and back.
 - Controls: the HMI now passes HID inputs `0x9` (knob + touchpad, 256×256) and the stock receiver registers `Eso_Knob` and `Eso_TrackPad`.
 - Audio negotiation: the phone builds its CarPlay audio output (no format errors, CarPlay audio port present).
-- Media audio: AAC-LC is received, decrypted, decoded on the car (Cinemo codec), handed to the stock audio path and **heard from the speakers**.
+- Media audio: AAC-LC is received, decrypted, decoded on the car (Cinemo codec), handed to the stock audio path and **plays continuously**.
 - The stock receiver's own buffering problem is solved by pacing (rebuffers went from 41–170 per track to 1).
+- Packet loss in the car's network stack is solved: a large relay socket buffer and a higher relay thread priority took losses from \~40 % to 0.
+- Calls: phone → car Opus is decoded for the stock voice path, and the car's microphone is encoded to Opus and sent to the phone; a full phone call works in both directions.
 - Calls: the stock receiver sets up a telephony stream (`PCM/16000/16/1 for telephony, input yes`); the session no longer drops.
 
 ---
@@ -102,6 +104,11 @@ Verified on the car, with car-side logs and iPhone logs:
 | Stock accepts the audio stream | `Main audio setting up PCM/48000/16/2 for media` |
 | Decoding | relay counts packets in, 4 PCM packets out per AAC unit |
 | Pacing | stock summary `Rebuffers=1` |
+| Continuous music | 16 windows of 500 packets: 0 lost, 0 silence, decoded time = RTP time, queue steady at 380–740 ms; `dropped due to full socket buffers` unchanged |
+| Phone call, phone → car | Opus decoded (`320 frames` per packet), stock `Late=0 Missing=0 Gaps=0`, caller heard |
+| Phone call, car → phone | microphone peak level up to 30 726 / 32 767, 1000+ Opus packets sent, far end hears the car |
+| Music → call → music | call → music → call → music in one session: each stream closed on TEARDOWN, socket re-keyed, both directions clear in every call, music resumes |
+| Navigation prompts over music | prompt on stream 101 alongside music on 102; prompt complete from the start; music locked 150–156 ms ahead of the stock play position, no gap storms, one short dip per prompt |
 
 Verified on the host test harness only:
 
@@ -124,21 +131,25 @@ Verified on the host test harness only:
 | 8 | Stream packets are larger than the stock 1472-byte receive buffer. | Relay re-frames into packets of ≤ 1440 bytes (4 × 256 frames). |
 | 9 | The phone sends media in **bursts** (it assumes a 1 s receiver buffer). | Relay queues decoded audio and paces it to the stock code at 48 kHz on the car's clock. |
 | 10 | iPhone uses **Opus 16 kHz mono** for telephony, Siri and alerts. | Needs an Opus decoder (and encoder for the microphone). |
+| 11 | The default UDP socket buffer (41 600 bytes ≈ 20 datagrams) overflows on the phone's bursts; \~40 % of media packets were dropped (`dropped due to full socket buffers`). | Relay socket buffer raised (768 KB with `kern.sbmax` = 1 MB), relay thread at priority 21. |
+| 12 | The phone receives the microphone on a port named in the call SETUP, not on the port it sends from. The stock code knows it; the relay does not. | The relay sends the encoded microphone to the destination the stock code addresses. |
+| 13 | The stock code reuses one audio socket for every main-audio stream (music, then call, then music). | On TEARDOWN the relay stream is closed (its pacer stops); a new SETUP replaces the previous stream's entry and keys for that socket. |
+| 14 | The stock jitter buffer holds only 55 packets (403 ms with 352-frame packets); its audio thread pauses \~360 ms when a navigation prompt starts, while its output keeps playing. A clock-driven pacer overfilled it and caused rebuffer cascades. | The music pacer reads the stock's play position (via `RTPJitterBufferRead`) and stays a fixed 150 ms ahead of it; queue drift is corrected 1 ms at a time. |
+| 15 | The stock code opens the prompt channel \~500 ms after the prompt stream starts. | 500 ms of silence before each prompt; the prompt starts complete. |
 
 ---
 
 ## 6. What is left
 
-### 6.1 Media audio quality — *in progress*
+### 6.1 Media audio — *done, two follow-ups*
 
-- Pacer queue runs empty: in the last run, 500 packets (10.7 s of music) arrived while 6.8 s of silence had to be inserted — music reaches the decoder at about 60 % of real time.
-- A larger relay socket buffer and per-500-packet diagnostics (wall time vs RTP time vs decoded time, sequence gaps) are deployed; next run decides between packet loss, slow sending by the phone, or decoding.
+- Make the `kern.sbmax` raise permanent (set in the start script before `dio_manager` starts).
+- Long-run check of the pacer against clock drift (queue level over 30+ minutes).
 
 ### 6.2 Voice audio (calls, Siri, navigation prompts)
 
-- Build an Opus decoder and encoder for QNX ARM and add them to the relay.
-- Decode phone → car (16 kHz mono PCM for the stock path); encode car microphone → phone.
-- Verify simultaneous media + prompt (stream 101) and call interruption of media.
+- Done: fixed-point Opus built for the car (encode 1.1 ms, decode 0.12 ms per 20 ms frame); phone calls work in both directions, with loss concealment on the downlink.
+- Left: Siri; tuning of the short music dip at the start of a prompt (stock thread pause, \~0.1–0.2 s).
 
 ### 6.3 Instrument cluster
 
