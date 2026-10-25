@@ -54,10 +54,12 @@ The design follows a factory wireless unit (Audi MIB2+):
 | Where | Files |
 | --- | --- |
 | `/mnt/ota/wcp/` | `libwcpstart.so`, `libbthook.so`, `wcpd`, `wcppaird`, `wcp-boot.sh`, `dio-up.sh`, `wcp-test4.sh`, `wcp-logcheck.sh`, optional `wcp.conf`, `nv/` (pairing libraries), the libraries `wcpd` needs |
-| `/eso/bin/apps/btstack` | the wrapper (from `bthook.zip`) |
-| `/eso/bin/apps/stock/btstack` | stock binary (SHA-256 31290e21…, 1 872 828 bytes) |
-| `dio_manager` wrapper | with `dio_manager.wcp.inc` inserted right before `exec "$REAL" "$@"` |
-| `/mnt/ota/wcp/wcp.conf` | optional, sourced as shell: `BTMAC=…` (car's Bluetooth address), `WCP_KEEP_BT=…` |
+| `/mnt/ota/app/AltScreen.tar.gz` + `/mnt/ota/app/AltScreen.sh` | the mod pack and the overlay script. One pack holds everything (built by `create_tar.bat` from `manifest.txt` + `manifest_wcp.txt`) and all of it lives in `/mnt/ota/altscreen/root`: paths under `mnt/app/...` are linked over flash, paths under `mnt/ota/wcp/...` file by file into `/mnt/ota/wcp`. |
+| `/mnt/ota/wcp/` | a real directory for data only: `pair/` (receiver identity, never in a pack), `wcp.conf`, markers, logs; the code there is links into the tree |
+| `/mnt/ota/altscreen/root/` | the pack unpacked once (`AltScreen.sh install` / `prepare`, or by `start` when the pack is newer), plus the stock copies `stock/dio_manager`, `stock/gal`, `stock/btstack` (copied from flash once; reused by the next prepare while unchanged; copied again only if the firmware brings a newer stock file). Linked as `/mnt/app/eso/bin/apps/stock/<name>`, so the processes keep their stock names. |
+| `/mnt/ota/altscreen/links.txt`, `orig.txt`, `prepared.txt` | the paths `start` links; the stock copies and their sources; what was prepared |
+| flash | stays stock (the wrappers are linked over it at boot); an older flash install of the btstack wrapper (`/eso/bin/apps/stock/btstack`) is recognised and its stock binary used |
+| `/mnt/ota/wcp/wcp.conf` | optional, sourced as shell: `WCP_KEEP_BT=…`; `BTMAC=…` only to override the address libbthook finds |
 
 ---
 
@@ -65,8 +67,8 @@ The design follows a factory wireless unit (Audi MIB2+):
 
 | When | What happens |
 | --- | --- |
-| Boot | The connectivity launcher starts `btstack` (the wrapper): stock btstack + libbthook; in the background, once `/mnt/ota` is mounted, `wcp-boot.sh start` (once per boot, `/tmp/wcp_boot_started`). |
-| `wcp-boot.sh start` | `kern.sbmax=1048576`, `/tmp/wcp_btmac`, session file `DISCONNECTED`, then `wcppaird` and `wcpd` (`WCP_START=1`, `WCP_GATE=/tmp/wcp_go`, `WCP_DIO_UP=dio-up.sh`). No `dio_manager`. |
+| Boot | The boot hook (servicemgrmibhigh) runs `AltScreen.sh start`: links only (`ln -sP` per line of `links.txt`, stock copies refreshed if the firmware brought newer ones), then the RGI renderer supervisor and `wcp-boot.sh start` in the background (it waits for `/dev/i2c8`). The connectivity launcher then starts `btstack` (the linked wrapper): stock btstack + libbthook; the wrapper also calls `wcp-boot.sh start` (a lock lets only one run). |
+| `wcp-boot.sh start` | `kern.sbmax=1048576`, `/tmp/wcp_btmac` only if `BTMAC` is configured, session file `DISCONNECTED`, then `wcppaird` and `wcpd` (`WCP_START=1`, `WCP_GATE=/tmp/wcp_go`, `WCP_DIO_UP=dio-up.sh`). No `dio_manager`. |
 | iPhone on Bluetooth | libbthook opens iAP2 if the phone does not (4 s); `wcpd` gets `phone link up` and runs `dio-up.sh` (head start). |
 | `CarPlayAvailability` | `wcpd` waits for `/tmp/wcp_dio_ready`, then writes `AVAILABLE`; the HMI lists device 200 and connects; the receiver listens (`/tmp/wcp_go`); `wcpd` sends `CarPlayStartSession`. |
 | Session | Wi-Fi, pairing, encrypted channels, iAP2 inside the session, Bluetooth released (§6). |
@@ -83,7 +85,7 @@ The design follows a factory wireless unit (Audi MIB2+):
 | `wcp_dio_mode` | wrapper insert | `usb <pid>` or `wireless <pid>` |
 | `wcp_dio_ready` | libwcpstart | `<pid>` of a wireless `dio_manager` that is up |
 | `wcp_phone_gone` | `wcpd` | the phone's Wi-Fi logged off the access point (hook ends the session) |
-| `wcp_btmac` | `wcp-boot.sh` | the car's Bluetooth address for the `wcp` module |
+| `wcp_btmac` | libbthook (or `wcp-boot.sh` from `wcp.conf`) | the car's Bluetooth address (`AA:BB:…`) for `wcpd`'s and the `wcp` module's identification. libbthook asks the chip (HCI `Read_BD_ADDR` through `ME_SendHciCommandAsync`, reply at token `+0x38`) or takes the stack's copy at `bt+0x1B4C`; a configured value is kept |
 | `wcp_boot_started` | btstack wrapper | boot start done (not again on a btstack restart) |
 | `bthook_registering` | libbthook | registration in progress; if btstack dies during it, the next btstack start stays stock |
 
@@ -207,6 +209,8 @@ btstack's code is mapped from flash and cannot be written at runtime, so libbtho
 | --- | --- |
 | `/mnt/ota/wcp/bthook_off` | btstack runs stock (library not loaded); no daemons at boot |
 | `/mnt/ota/wcp/bthook_test` | libbthook loaded, only logs, registers nothing |
+| `/mnt/ota/wcp/bthook_noask` | libbthook does not ask the chip for the car's Bluetooth address (stack's copy only) |
+| `/mnt/ota/.sf_disable` | the boot hook starts no mods at all (`sf_disable` on SD/USB at boot creates it) |
 | `/mnt/ota/wcp/wcp_noboot` | libbthook active, daemons not started at boot |
 | `/tmp/bthook_registering` | set by libbthook; present after a crash during registration → next btstack start stays stock (remove to retry) |
 
@@ -221,7 +225,7 @@ btstack's code is mapped from flash and cannot be written at runtime, so libbtho
 | `WCP_START` | 1 (boot) | answer `CarPlayAvailability` with `CarPlayStartSession` |
 | `WCP_GATE` | `/tmp/wcp_go` (boot) | send StartSession only while the receiver listens |
 | `WCP_DIO_UP` | `dio-up.sh` (boot) | `dio_manager` on demand; unset = never started by `wcpd` |
-| `WCP_BTMAC` | from `wcp.conf` | car's Bluetooth address (identification) |
+| `WCP_BTMAC` | from `wcp.conf` (normally empty) | car's Bluetooth address; empty = `/tmp/wcp_btmac` from libbthook |
 | `WCP_SS_TIMEOUT_MS` | 25000 | no session this long after StartSession → restart the wireless `dio_manager`; 0 = off |
 | `WCP_REOFFER_MS` | 20000 | offer CarPlay again if no receiver came up |
 | `WCP_BT_DROP_MS` | 8000 | close a Bluetooth iAP2 link still open this long into a session; 0 = off |

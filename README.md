@@ -1,6 +1,6 @@
 # Wireless CarPlay on MHI2Q QC — Project Status
 
-**Unit:** MHI2Q QC (mmx2qc), rel/CLU7, Harman 2016, QNX 6.5.0 ARMv7 (APQ8064), firmware 3638 / MU0917 **Phone under test:** iPhone, iOS 27 **Goal:** native wireless CarPlay on a head unit that only ships wired CarPlay, keeping the stock CarPlay receiver (AirPlay 210.81 in `dio_manager`), the stock iAP2 client and the stock HMI. **Last update:** 2026-10-25 (later) — stock btstack with `libbthook.so` (no patched binary), the car opens iAP2 itself (cold boot, reconnect, pairing), one logging scheme for all components, `dio_manager` on demand and a boot start (both new, to be verified on the car).
+**Unit:** MHI2Q QC (mmx2qc), rel/CLU7, Harman 2016, QNX 6.5.0 ARMv7 (APQ8064), firmware 3638 / MU0917 **Phone under test:** iPhone, iOS 27 **Goal:** native wireless CarPlay on a head unit that only ships wired CarPlay, keeping the stock CarPlay receiver (AirPlay 210.81 in `dio_manager`), the stock iAP2 client and the stock HMI. **Last update:** 2026-10-25 (end of day) — event-channel pump stable on the car, AltScreen.sh reworked (pack prepared once in `/mnt/ota/altscreen`, boot only links; one pack and one builder for all mods), car's Bluetooth address read from the chip/stack (no per-car setting), separate marker for raw dumps, log check script.
 
 ---
 
@@ -29,7 +29,9 @@
 | MMI prompt "A password must be entered for this data transfer" | ✅ no longer appears |
 | Logging (`DEBUG_LOG` build switch, markers `debug_wificp` and `debug_wificp_raw`) | ✅ in all components; raw dumps separate (they were >80 % of the hook log) |
 | `dio_manager` on demand (no permanent instance; USB wins) | ✅ wireless verified on the car (started at Bluetooth link-up, offered when ready); USB hand-over still to test |
-| Start at boot (btstack wrapper → `wcp-boot.sh`) | 🔵 implemented, car test pending |
+| **Car's Bluetooth address** for the identification | ✅ verified — libbthook asks the chip / takes the stack's copy (`2C:DC:AD:4C:64:0F` at 10 s); the old hard-coded `…64:CF` was wrong; no per-car setting |
+| **Install / boot start: AltScreen.sh, option A** (pack prepared once in `/mnt/ota/altscreen`, boot only creates links; one pack for AltScreen/RGI and wireless CarPlay) | 🔵 built and host-simulated (start \~0.1 s instead of 4 s); car install pending |
+| Start of the wireless CarPlay daemons at boot | 🔵 from `AltScreen.sh start` and the btstack wrapper (lock: one start; waits for the MFi bus); car test pending |
 
 ---
 
@@ -87,6 +89,9 @@ The design follows what an iPhone log from a factory wireless unit (Audi MMI, Al
 | 16 | The stock receiver reads the event channel only while it waits for the reply to one of its own requests. The phone's replies to our iAP2 messages (`iAPSendMessage`) therefore piled up and were taken out \~16 s late; the 64-entry reply queue overflowed and replies reached the wrong owner. On the next touch (`hidSendReport`) the stock code got those replies, closed the event channel, and the phone ended the session (phone log: connection to port 5001 closed, reason -72320). | Event-channel pump in the hook: whenever a stock thread waits in `select()` without the event socket, the hook adds it and reads it itself (our replies consumed at once, the stock's kept and reported readable when it waits); one reader at a time; queue 256. `WCP_NO_EV_PUMP=1` switches it off. |
 | 17 | A gate file outlives a dead `dio_manager` (process exit closes no sockets through the hook), so `CarPlayStartSession` was sent with no receiver. | The gate carries the pid; `wcpd` ignores and removes a stale one; `dio-up.sh` clears it; if the receiver takes no session within 25 s of StartSession, the wireless `dio_manager` is restarted. |
 | 18 | QNX's ksh has predefined aliases (`stop='kill -STOP'`) that hit `stop() {`; an empty `LD_PRELOAD=` keeps programs from starting; `/tmp` (`/dev/shmem`) has no directories. | Prefixed shell functions, `unset LD_PRELOAD`, previous logs kept as `/tmp/prev_*`. |
+| 19 | The car's Bluetooth address in the identification was a hard-coded `2C:DC:AD:4C:64:CF`; the real one (iPhone log, stock Bluetooth service, the chip) is `2C:DC:AD:4C:64:0F`. The stack keeps it at `bt+0x1B4C` (`bt` = 0x2DA0EC), filled at a varying time (10 s or \~41 s). | libbthook sends HCI `Read_BD_ADDR` through the stack's `ME_SendHciCommandAsync` with a token of its own (reply at token `+0x38`: `01 09 10 00` + address), else takes the stack's copy; writes `/tmp/wcp_btmac`; `wcpd` and the `wcp` module read it. `BTMAC` in `wcp.conf` only as an override. |
+| 20 | `rename()` of a temp file in `/tmp` (`/dev/shmem`) failed silently on the car. | State files in `/tmp` are written in place with one write. |
+| 21 | `AltScreen.sh start` (4 s: unpack 2.3 MB, copy 2 MB of stock binaries, directory scan) ran before the stock service manager, delaying every service. | Option A: unpack and stock copies once at install into `/mnt/ota/altscreen/root` (stock copies as `stock/<name>`, so process names stay stock; reused while unchanged; refreshed if the firmware brings a newer one); boot only links (`links.txt`). Wireless CarPlay files live in the same tree and are linked file by file into `/mnt/ota/wcp`, which keeps only data (`pair/`, `wcp.conf`, markers, logs). |
 
 ### Audio findings (unchanged)
 
@@ -120,7 +125,9 @@ On the car, with car logs (`wcpd.log`, `wcphook.log`, `dio_trace.log`, `sloginfo
 | Phone gone | watchdog `phone silent for 5015 ms`; access point `STA_DEAUTH` logged immediately on Wi-Fi off; host test: session ended 0.21 s after the flag |
 | Stock btstack + libbthook | `active without code changes`, `stack start-up reached the graft's hook point`, RFCOMM channel 4 + both records; advertisement `CarPlay UUID PRESENT`; btstack keeps its pid |
 | Car-initiated iAP2 | cold boot: car connects the phone 37 s, iAP2 opened 41 s, CarPlay without touching the phone; after Wi-Fi off/on: again within 6 s of the reconnect; fresh pairing: CarPlay offered \~4 s after pairing |
-| Logging scheme | release builds without log strings or diagnostic interposers; host tests: no log without the marker, log once it exists |
+| Logging scheme | release builds without log strings or diagnostic interposers; host tests: no log without the marker, log once it exists; raw dumps only with `debug_wificp_raw` (4.5 KB instead of 40 KB per test session) |
+| Event-channel pump | `event pump: reading the event channel while the stock code does not`, 0 requests piling up (768 in the drop run) |
+| Car's Bluetooth address | `/tmp/wcp_btmac` = `2C:DC:AD:4C:64:0F` at 10.1 s; `wcpd`: `car Bluetooth address … (from the stack)` in the identification |
 | Earlier results still valid | screen, controls, media audio, prompts over music, music ↔ call switching, cluster map |
 
 ---
@@ -129,8 +136,10 @@ On the car, with car logs (`wcpd.log`, `wcphook.log`, `dio_trace.log`, `sloginfo
 
 | Item | Notes |
 | --- | --- |
-| USB hand-over | Needs the insert `dio_manager.wcp.inc` in the `dio_manager` wrapper. Car tests: USB phone with no wireless (stock), USB plugged in during wireless (wireless instance gives way), wireless after a USB session. |
-| Start at boot | Car test of the btstack wrapper starting `wcp-boot.sh`; `kern.sbmax` is now set there. Alternative: start from the runQC / RGI-Q overlay instead. |
+| **Install with the new AltScreen.sh** | Build the pack with `create_tar.bat` (`manifest.txt` + `manifest_wcp.txt`; runtime libraries copied once from the car into `wcp_runtime/`; new `dio_manager` and `gal` wrappers in `support/`), `AltScreen.sh install`, reboot. Check: `/tmp/AltScreenStarted` `seconds=0/1`, `AltScreen.sh check`, `ls -l /mnt/ota/wcp` (code = links), `wcp-boot.sh status`. Then delete the old real files in `/mnt/ota/wcp` (`btstack`, `libopus_wcp.a`, `wcp-test.sh`…`wcp-test3.sh`, `drop.tar`). |
+| Flash back to stock | Once the overlay runs: copy `/eso/bin/apps/stock/btstack` back over `/eso/bin/apps/btstack`, remove `stock/` from flash (the overlay links the wrapper). |
+| Boot time | Stock \~16 s to the first screen, with the mods 20–25 s, sometimes 40 s. Compare a fast and a slow boot after the new start (`sloginfo` `BENCH_Startup`, `AltScreen_boot.log`). Optional: shorter wait (1 s) before the car opens iAP2 for a known iPhone; early connect at stack start behind a marker. |
+| USB hand-over | The insert is now in the pack's `dio_manager` wrapper. Car tests: USB phone with no wireless (stock), USB plugged in during wireless (wireless instance gives way), wireless after a USB session. |
 | Firewall | A proper rule set for the CarPlay ports on `uap0` (no disabling of the packet filter). |
 | HMI bridge | Rebuild `AltScreenQ_wcp.jar` with the logging change (`DEBUG_LOG` constant). |
 | Microphone quality | Our Opus encoder runs at 24 kbit/s, complexity 5 (CPU choice); 32 kbit/s / complexity 8 would cost \~2–3 ms per 20 ms frame. |
@@ -157,18 +166,24 @@ On the car, with car logs (`wcpd.log`, `wcphook.log`, `dio_trace.log`, `sloginfo
 ## 7. Test procedure and switches
 
 ```sh
-sh /mnt/ota/wcp/wcp-boot.sh status      # what runs (wcpd, wcppaird, dio_manager and its mode)
-sh /mnt/ota/wcp/wcp-test4.sh            # restart the daemons for a test (old logs removed)
+sh /mnt/ota/app/AltScreen.sh check      # overlay, prepared tree, stock copies, wrappers, processes
+sh /mnt/ota/wcp/wcp-boot.sh status      # what runs (wcpd, wcppaird, dio_manager and its mode), logging
+sh /mnt/ota/wcp/wcp-test4.sh            # restart the daemons for a test (old logs kept as /tmp/prev_*)
+sh /mnt/ota/wcp/wcp-logcheck.sh [prev]  # the lines that matter from the logs
 touch /mnt/ota/app/debug_wificp         # logs on (DEBUG_LOG=1 builds); rm to switch off
+touch /mnt/ota/app/debug_wificp_raw     # + raw dumps (hex, every iAP2 packet)
 ```
 
-Build: `build_wcp.bat` (`set DEBUG_LOG=0` for a release without log code) → `libwcpstart.so`, `libbthook.so`, `wcpd`, `wcppaird`.
+Build: `build_wcp.bat` (`set DEBUG_LOG=0` for a release without log code) → `libwcpstart.so`, `libbthook.so`, `wcpd`, `wcppaird`; then `create_tar.bat` → `AltScreen.tar.gz` (all mods).
 
 | Marker | Effect |
 | --- | --- |
 | `/mnt/ota/app/debug_wificp` | every component writes its log (DEBUG_LOG=1 builds) |
+| `/mnt/ota/app/debug_wificp_raw` | with the above: raw dumps too |
+| `/mnt/ota/.sf_disable` | boot hook starts nothing (all mods off; `sf_disable` on SD/USB creates it) |
 | `/mnt/ota/wcp/bthook_off` | btstack runs stock, no daemons at boot |
 | `/mnt/ota/wcp/bthook_test` | libbthook only logs, registers nothing |
+| `/mnt/ota/wcp/bthook_noask` | libbthook does not ask the chip for the address (stack's copy only) |
 | `/mnt/ota/wcp/wcp_noboot` | daemons not started at boot |
 
 | Switch | Default | Effect |
