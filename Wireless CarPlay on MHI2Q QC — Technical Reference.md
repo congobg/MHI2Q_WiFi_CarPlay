@@ -53,13 +53,32 @@ The design follows a factory wireless unit (Audi MIB2+):
 
 | Where | Files |
 | --- | --- |
-| `/mnt/ota/wcp/` | `libwcpstart.so`, `libbthook.so`, `wcpd`, `wcppaird`, `wcp-boot.sh`, `dio-up.sh`, `wcp-test4.sh`, `wcp-logcheck.sh`, optional `wcp.conf`, `nv/` (pairing libraries), the libraries `wcpd` needs |
+| `/mnt/ota/wcp/` | `libwcpstart.so`, `libbthook.so`, `wcpd`, `wcppaird`, `wcp-boot.sh`, `dio-up.sh`, `wcp-test4.sh`, `wcp-logcheck.sh`, `nv/` (pairing libraries), the libraries `wcpd` needs |
 | `/mnt/ota/app/AltScreen.tar.gz` + `/mnt/ota/app/AltScreen.sh` | the mod pack and the overlay script. One pack holds everything (built by `create_tar.bat` from `manifest.txt` + `manifest_wcp.txt`) and all of it lives in `/mnt/ota/altscreen/root`: paths under `mnt/app/...` are linked over flash, paths under `mnt/ota/wcp/...` file by file into `/mnt/ota/wcp`. |
-| `/mnt/ota/wcp/` | a real directory for data only: `pair/` (receiver identity, never in a pack), `wcp.conf`, markers, logs; the code there is links into the tree |
+| `/mnt/ota/wcp/` | a real directory for data only: `pair/` (receiver identity, never in a pack); the code there is links into the tree |
 | `/mnt/ota/altscreen/root/` | the pack unpacked once (`AltScreen.sh install` / `prepare`, or by `start` when the pack is newer), plus the stock copies `stock/dio_manager`, `stock/gal`, `stock/btstack` (copied from flash once; reused by the next prepare while unchanged; copied again only if the firmware brings a newer stock file). Linked as `/mnt/app/eso/bin/apps/stock/<name>`, so the processes keep their stock names. |
 | `/mnt/ota/altscreen/links.txt`, `orig.txt`, `prepared.txt` | the paths `start` links; the stock copies and their sources; what was prepared |
 | flash | stays stock (the wrappers are linked over it at boot); an older flash install of the btstack wrapper (`/eso/bin/apps/stock/btstack`) is recognised and its stock binary used |
-| `/mnt/ota/wcp/wcp.conf` | optional, sourced as shell: `WCP_KEEP_BT=…`; `BTMAC=…` only to override the address libbthook finds |
+| `/mnt/ota/app/wcp.conf` | optional, sourced as shell: `WCP_KEEP_BT=…`; `BTMAC=…` only to override the address libbthook finds |
+
+### Pairing data: `/mnt/ota/wcp/pair/` - never delete
+
+| File | What | If lost |
+| --- | --- | --- |
+| `identity` (64 bytes) | the car's CarPlay pairing key (private + public) | **the car gets a new identity at the next boot: every phone must forget the car and pair again** |
+| `pairid` (UUID text) | the car's pairing identifier "pi" (CarPlayStartSession, /info, Bonjour) | same as above |
+| `peer-<hex of the phone's pairing id>` (32 bytes) | a phone's public key, written at its first wireless connection; iOS uses one pairing identity per **Apple ID**, so all phones on one Apple ID share one file | that Apple ID pairs again at its next connection (no "Forget This Car" needed) |
+
+`wcppaird` creates `identity` and `pairid` only when they are missing (`new pairing identifier …` in `wcppaird.log`). Seen on 26 Oct: the folder was lost in a clean-up of `/mnt/ota/wcp`, the car came back with a new pi (`A229FAB4…` → `B8687833…`), and the phones connected and passed pair-verify but never started CarPlay until each had forgotten the car and paired again. `AltScreen.sh prepare` never touches `pair/`.
+
+Backup after pairing a new phone (a new Apple ID); restore with the daemons stopped (`wcppaird` keeps the identity in memory):
+
+```
+tar -czf /mnt/ota/wcp_pair_backup.tgz -C /mnt/ota/wcp pair          # backup
+sh /mnt/ota/wcp/wcp-boot.sh stop                                     # restore
+tar -xzf /mnt/ota/wcp_pair_backup.tgz -C /mnt/ota/wcp
+reboot
+```
 
 ---
 
@@ -73,7 +92,8 @@ The design follows a factory wireless unit (Audi MIB2+):
 | `CarPlayAvailability` | `wcpd` waits for `/tmp/wcp_dio_ready`, then writes `AVAILABLE`; the HMI lists device 200 and connects; the receiver listens (`/tmp/wcp_go`); `wcpd` sends `CarPlayStartSession`. |
 | Session | Wi-Fi, pairing, encrypted channels, iAP2 inside the session, Bluetooth released (§6). |
 | Session end | `dio_manager` re-enables Bluetooth and exits; the car reconnects the phone over Bluetooth; the next connection starts a new `dio_manager`. |
-| USB iPhone | smartphone_integrator starts the wrapper (no `WCP_DIO_WIRELESS`): a running wireless instance is stopped first; `/tmp/wcp_dio_mode` = `usb <pid>`; `wcpd` neither starts nor offers wireless until it ends. |
+| USB iPhone | smartphone_integrator starts the wrapper (no `WCP_DIO_WIRELESS`): a running wireless instance is stopped first; `/tmp/wcp_dio_mode` = `usb <pid>`; `wcpd` neither starts nor offers wireless until it ends. Seen on the car: with the phone in wireless CarPlay, plugging in only charges it — the USB session ends after \~8 s and wireless comes back; with the phone's Bluetooth and Wi-Fi off, USB CarPlay runs. |
+| USB unplugged | libbthook sees the USB `dio_manager` gone (`/tmp/wcp_dio_mode`, checked once a second) and opens iAP2 to the phone 3 s later; wireless CarPlay resumes (`bthook_nousbresume` switches it off). |
 | Recovery | A gate whose `dio_manager` is dead is ignored and removed. If no session is reported within 25 s of StartSession, `wcpd` stops the wireless `dio_manager`, a fresh one is started, and CarPlay is offered again. |
 
 **State files** (all in `/tmp`, which is `/dev/shmem` — no directories):
@@ -156,7 +176,7 @@ btstack's code is mapped from flash and cannot be written at runtime, so libbtho
 | 102 media, AAC-LC 48 kHz stereo | type 100, PCM 48 kHz stereo | decrypt → decode → queue → paced on the stock play position (150 ms ahead) |
 | 100 / 101, Opus 16 kHz mono | type 100 / 101, PCM 16 kHz mono | decrypt → Opus decode (loss concealment) → PCM; 500 ms lead-in before prompts |
 | 100, Opus 48 kHz mono | type 100, PCM 48 kHz stereo | decrypt → decode → stereo |
-| microphone | — | stock PCM → Opus 16 kHz mono, 24 kbit/s, complexity 5 → encrypted → to the phone |
+| microphone | — | stock PCM → Opus 16 kHz mono, 32 kbit/s, complexity 8 (`WCP_MIC_BITRATE`, `WCP_MIC_COMPLEXITY`) → encrypted → to the phone |
 
 ### 8.3 Quality compared with USB
 
@@ -165,7 +185,7 @@ btstack's code is mapped from flash and cannot be written at runtime, so libbtho
 | Music | AAC-LC 48 kHz stereo from the phone (128 kbit/s CBR or 192 kbit/s VBR) | PCM 48 kHz stereo | no — compressed by the phone, inherent to wireless CarPlay |
 | Calls, Siri | 16 kHz mono | 16 kHz mono (stock list `in 0x10 / out 0x8010`) | no |
 | Prompts | 16 kHz mono | 16 kHz mono (stock alt list `0x10`) | no |
-| Microphone | Opus 24 kbit/s, complexity 5 | PCM | our setting (CPU); can be raised |
+| Microphone | Opus 32 kbit/s, complexity 8 | PCM | our setting (was 24 kbit/s, complexity 5) |
 
 ---
 
@@ -205,14 +225,65 @@ btstack's code is mapped from flash and cannot be written at runtime, so libbtho
 
 ## 10. Control markers
 
-| Marker | Effect |
-| --- | --- |
-| `/mnt/ota/wcp/bthook_off` | btstack runs stock (library not loaded); no daemons at boot |
-| `/mnt/ota/wcp/bthook_test` | libbthook loaded, only logs, registers nothing |
-| `/mnt/ota/wcp/bthook_noask` | libbthook does not ask the chip for the car's Bluetooth address (stack's copy only) |
-| `/mnt/ota/.sf_disable` | the boot hook starts no mods at all (`sf_disable` on SD/USB at boot creates it) |
-| `/mnt/ota/wcp/wcp_noboot` | libbthook active, daemons not started at boot |
-| `/tmp/bthook_registering` | set by libbthook; present after a crash during registration → next btstack start stays stock (remove to retry) |
+All control files (markers, settings, tuning values) are in `/mnt/ota/app` (older builds used `/mnt/app`, `/mnt/ota/ALT`, `/mnt/ota/wcp` and `/mnt/ota/.sf_disable`). `AltScreen.sh check` lists the ones that are set, each with what it is for, and any other file in `/mnt/ota/app` as not known. `/tmp/…` switches last until the next reboot.
+
+| `/mnt/ota/app/…` | `check` says | Effect |
+| --- | --- | --- |
+| `.sf_disable` | all mods off (boot hook) | the boot hook starts nothing (`sf_disable` on SD/USB at boot creates it; its path is written into the hook by `install`); also written by the crash watch after an HMI crash loop. Delete it to turn the mods back on |
+| `debug_wificp` | wireless CarPlay logs on | `/tmp/wcphook.log`, `wcpd.log`, `bthook.log`, `wcpstart.log`, `wcppaird.log`, … (DEBUG_LOG=1 builds) |
+| `debug_wificp_raw` | plus raw dumps | with the above: hex dumps |
+| `debug_hook` | hook and renderer logs | `librgi_hook`, `maneuver_render` |
+| `debug_video` | video bridge logs on | vidbridge / `altscreen_present` |
+| `debug_java` | Java HMI logs on | `/tmp/carplay_java.log` |
+| `bthook_off` | Bluetooth hook off, stock | btstack runs stock (library not loaded); no daemons at boot |
+| `bthook_test` | Bluetooth hook logs only | libbthook loaded, only logs, registers nothing |
+| `bthook_noask` | BT address from stack | libbthook does not ask the chip for the car's Bluetooth address (stack's copy only) |
+| `bthook_nousbresume` | no wireless after USB | libbthook does not open iAP2 when a USB CarPlay session ends |
+| `wcp_noboot` | wireless daemons not started | libbthook active, `wcpd`/`wcppaird` not started at boot |
+| `wcp.conf` | wireless CarPlay settings | sourced as shell by `wcp-boot.sh` / `dio-up.sh` (`WCP_…` switches, section 11) |
+| `wcp_hmi.conf` | HMI bridge settings | optional settings of `WirelessCarPlayBridge` |
+| `wcp_btmac` | car Bluetooth address (override) | for `librgi_hook`; normally `/tmp/wcp_btmac` from libbthook |
+| `rgd_disable` | route renderer not started | the supervisor does not start `maneuver_render` (a running one is left alone) |
+| `rgi_passive` | RGI hook only logs | `librgi_hook` binds and logs, changes nothing |
+| `rgi_java_nodefer` | CarPlay modules start immediately | no 10 s defer of the RGI jar's CarPlay modules |
+| `rgi_projection_nowait` | cluster switch without waiting | projection jar: switch at once, not after the first picture |
+| `rgi_pb_keep` | stock phonebook kept | RGI jar: stock phonebook support in the cluster |
+| `rgi_alt_hide` | altitude hidden too | RGI jar: the altitude is hidden as well as the map scale |
+| `rgi_scale_keep` | map scale stays visible | RGI jar: map scale and altitude stay |
+| `rgi_cluster_fps` | cluster frame rate (test) | RGI jar: update rate of the cluster context (test only) |
+| `rgi_cluster_restore_fps` | cluster rate after (test) | RGI jar: rate restored afterwards (test only) |
+| `aa_cluster.daynight` | AA theme follows day/night | libaaproxy: Android Auto cluster theme follows day/night (applies from the next connect) |
+| `rgd_window_id` | renderer window id | `maneuver_render`: window id (1–255) |
+| `rgd_swap_interval` | renderer swap interval | `maneuver_render`: swap interval (0–10); with `rgd_window_id` the only `rgd_paths.h` entries this build reads |
+
+`check` ignores `AltScreen.sh`, `*.tar.gz` and the install markers `AltScreen.tar.gz.checksum` / `AltScreen.tar.gz.fileinfo`; any other file there is listed as "not a known control file" (e.g. dated backups).
+
+| `/tmp/…` (until reboot) | `check` says | Set by / effect |
+| --- | --- | --- |
+| `rgd_disable` | route renderer not started | by hand or the crash watch: no RGI renderer / hook for this boot |
+| `cpproxy_disable` | cluster (libcpproxy) off | by hand or the crash watch: `dio_manager` without libcpproxy |
+| `aaproxy_disable` | AA cluster (libaaproxy) off | by hand or the crash watch: `gal` without libaaproxy |
+| `wcp_dio_off` | wireless dio_manager not started | crash watch: `dio-up.sh` starts no wireless `dio_manager` |
+| `rgi_passive` | RGI hook only logs | as the `/mnt/ota/app` one, for this boot |
+| `rgi_java_nodefer` | CarPlay modules start immediately | as the `/mnt/ota/app` one, for this boot |
+| `bthook_off` | Bluetooth hook off, stock | by hand or the crash watch: stock btstack from its next start |
+| `altscreen_port` | test port file | test only |
+| `bthook_registering` | – | set by libbthook while it registers; present after a crash during registration → the library stays inactive until reboot |
+| `wcp_boot_started` | – | the daemons are started once per boot, not again when the launcher restarts btstack (not a crash guard) |
+
+**Crash watch** (`AltScreen.sh`, started by `start`, `SF_CRASHWATCH=0` = off). The system's dumper leaves a core file in `/mnt/ota/system/core` for every process that dies of a fault (`<name>.core.gz`, repeats numbered `<name>.N.core.gz`, 0 bytes with `-m`); normal exits, `slay` and launcher restarts leave none. The watcher checks that directory every 10 s (a file newer than its stamp = a crash). Two crashes of the same program within 10 min switch our part in it off; its next start runs stock:
+
+| Program | Marker (reason inside) | Effect |
+| --- | --- | --- |
+| `btstack` | `/tmp/bthook_off` | stock btstack: Bluetooth and calls work, no wireless CarPlay |
+| `dio_manager`, USB session | `/tmp/cpproxy_disable` + `/tmp/rgd_disable` | plain USB CarPlay |
+| `dio_manager`, wireless (`/tmp/wcp_dio_mode`) | `/tmp/wcp_dio_off` | `dio-up.sh` starts no wireless dio_manager; USB unaffected |
+| `gal` | `/tmp/aaproxy_disable` | plain Android Auto |
+| `maneuver_render` | `/tmp/rgd_disable` | the supervisor stops restarting it |
+| `altscreen_present` | `/tmp/cpproxy_disable` | no cluster video |
+| `j9` (HMI) | `/mnt/ota/app/.sf_disable` (sticky) | overlay stopped at once (HMI comes back stock), all mods off at every boot until deleted |
+
+`/tmp` markers last until the next reboot. Events: `/tmp/crashwatch.log`. `AltScreen.sh check` shows the markers with their reason and whether the watch runs.
 
 ---
 
@@ -226,7 +297,7 @@ btstack's code is mapped from flash and cannot be written at runtime, so libbtho
 | `WCP_GATE` | `/tmp/wcp_go` (boot) | send StartSession only while the receiver listens |
 | `WCP_DIO_UP` | `dio-up.sh` (boot) | `dio_manager` on demand; unset = never started by `wcpd` |
 | `WCP_BTMAC` | from `wcp.conf` (normally empty) | car's Bluetooth address; empty = `/tmp/wcp_btmac` from libbthook |
-| `WCP_SS_TIMEOUT_MS` | 25000 | no session this long after StartSession → restart the wireless `dio_manager`; 0 = off |
+| `WCP_SS_TIMEOUT_MS` | 25000 | no session this long after StartSession — or after the phone joined the Wi-Fi, if later — → restart the wireless `dio_manager`; while no station is on the car's Wi-Fi it waits instead (restarting would not help); 0 = off |
 | `WCP_REOFFER_MS` | 20000 | offer CarPlay again if no receiver came up |
 | `WCP_BT_DROP_MS` | 8000 | close a Bluetooth iAP2 link still open this long into a session; 0 = off |
 | `WCP_AP_WATCH` | on | 0: do not follow the access point's station events |
@@ -260,7 +331,9 @@ btstack's code is mapped from flash and cannot be written at runtime, so libbtho
 | `WCP_STOCK_RCVBUF` | on | 0: default receive buffer for the stock audio socket |
 | `WCP_102_BUFFER`, `WCP_102_TARGET`, `WCP_102_LATENCY`, `WCP_102_PKT` | 600, 150, 100, 352 | media: queue before start (ms), lead over the stock play position (ms), latency given to the stock code (ms), packet size (frames) |
 | `WCP_102_OPENLOOP`, `WCP_102_NOPACE`, `WCP_102_NOGATE`, `WCP_102_HOLD`, `WCP_102_STRIP` | off | media pacing experiments |
-| `WCP_101_LEADIN`, `WCP_100_LEADIN` | 500, 0 | silence before prompts / main-channel voice (ms) |
+| `WCP_101_LEADIN`, `WCP_100_LEADIN` | 0, 0 | silence before prompts / main-channel voice (ms); no longer needed since the stream keys are prepared at the SETUP |
+| `WCP_102_BOOST` | 0 | ms of extra music margin from another stream's SETUP for 2.5 s (test switch) |
+| `WCP_RTP_SEQ` | 1 | first RTP sequence number the relay gives the stock; `rand` = old behaviour |
 | `WCP_AF_<NAME>_IN/_OUT`, `WCP_AF_PCM_ONLY`, `WCP_AF_HIGH_NODEFAULT`, `WCP_AUDIO_TYPES`, `WCP_AUDIO_STOCK` | — | audio format list overrides (`DEF`, `MEDIA`, `TEL`, `SIRI`, `ALERT`, `ALT`, `HIGH`) |
 | `WCP_INFO_FEATURES_OR`, `WCP_EV_SWAP`, `WCP_SCREEN_CLEAR_FLAGS`, `WCP_DEBUG_CF` | — | experiments / analysis |
 | `WCP_EARLY` | off | old start order |

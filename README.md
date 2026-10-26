@@ -15,23 +15,24 @@
 | Pairing (Pair-Setup / Pair-Verify) and encrypted channels | ✅ verified |
 | Main screen (1024×480), knob and touchpad | ✅ verified |
 | HMI integration (device list, activation, context switch) | ✅ verified |
-| Media audio, navigation prompts over music | ✅ verified |
+| Media audio, navigation prompts over music | ✅ verified — the short music drop just before each prompt is fixed (26 Oct) |
 | Calls and Siri (Opus), microphone | ✅ verified — both directions, MMI volume knob active during calls |
 | Instrument-cluster map stream | ✅ verified |
 | **iAP2 inside the AirPlay session** (now playing, cover art, call lists, favourites, route guidance to the cluster, location, vehicle data) | ✅ verified — same transport as the factory MIB2+ |
 | **Bluetooth released during CarPlay**, restored afterwards | ✅ verified — single audio route on the phone |
 | Session stability | ✅ verified — dio_manager's 6 s startup timeout handled |
-| **Disconnect / reconnect** (CarPlay off and on at the phone) | ✅ verified — works every time |
-| Session drop when touching the controls after a few minutes | ✅ fixed (event-channel pump) — first car test stable: pump active, no requests piling up; long-run check still open |
+| **Disconnect / reconnect** (CarPlay off and on at the phone) | ✅ verified — with the first test phone and a second, newly paired iPhone (after fix #23) |
+| Session drop when touching the controls after a few minutes | ✅ fixed (event-channel pump) — confirmed by a 2 h 30 min session without a drop |
 | Recovery after a drop (stale gate, receiver not taking the session) | ✅ verified — a fresh `dio_manager` started on demand, CarPlay back \~14 s after the drop |
 | **Phone leaving the Wi-Fi** detected | ✅ verified — Wi-Fi switched off: \~0.25 s (access point event); otherwise 5 s (keep-alive watchdog) |
-| PHONE hard key in CarPlay | 🟡 only the first press opens CarPlay (nice to have) |
+| PHONE hard key in CarPlay | ✅ accepted as is — a second press opens CarPlay |
 | MMI prompt "A password must be entered for this data transfer" | ✅ no longer appears |
 | Logging (`DEBUG_LOG` build switch, markers `debug_wificp` and `debug_wificp_raw`) | ✅ in all components; raw dumps separate (they were >80 % of the hook log) |
-| `dio_manager` on demand (no permanent instance; USB wins) | ✅ wireless verified on the car (started at Bluetooth link-up, offered when ready); USB hand-over still to test |
+| `dio_manager` on demand (no permanent instance; USB wins) | ✅ verified — wireless and USB, see "USB and wireless" below |
 | **Car's Bluetooth address** for the identification | ✅ verified — libbthook asks the chip / takes the stack's copy (`2C:DC:AD:4C:64:0F` at 10 s); the old hard-coded `…64:CF` was wrong; no per-car setting |
-| **Install / boot start: AltScreen.sh, option A** (pack prepared once in `/mnt/ota/altscreen`, boot only creates links; one pack for AltScreen/RGI and wireless CarPlay) | 🔵 built and host-simulated (start \~0.1 s instead of 4 s); car install pending |
-| Start of the wireless CarPlay daemons at boot | 🔵 from `AltScreen.sh start` and the btstack wrapper (lock: one start; waits for the MFi bus); car test pending |
+| **Install / boot start: AltScreen.sh, option A** (pack prepared once in `/mnt/ota/altscreen`, boot only creates links; one pack for AltScreen/RGI and wireless CarPlay) | ✅ verified on the car — 31 links, start done in 0 s (3 s after boot; was 4 s). Boot to the first screen ≤ 15 s (was 20–25 s, sometimes 40 s), phone on Bluetooth at \~25 s, CarPlay ≤ 15 s later |
+| Start of the wireless CarPlay daemons at boot | ✅ verified — from `AltScreen.sh start` and the btstack wrapper (lock: one start; waits for the MFi bus); nothing started by hand |
+| **Long run** | ✅ verified — one CarPlay session of more than 2 h 30 min with music, navigation and controls: no drop, event channel clean (0 requests piling up) |
 
 ---
 
@@ -41,7 +42,7 @@ The design follows what an iPhone log from a factory wireless unit (Audi MMI, Al
 
 | Component | Runs in | Role |
 | --- | --- | --- |
-| `libbthook.so` (preloaded into the stock btstack by the `btstack` wrapper) | Bluetooth stack | RFCOMM channel for iAP2, iAP2 and CarPlay SDP records (the CarPlay UUID then appears in the advertisement by itself); bridges the channel to `wcpd` (`127.0.0.1:57342`); opens iAP2 from the car when the car connected the phone. The wrapper also starts `wcp-boot.sh` once per boot. (`btstack.graft` remains as fallback.) |
+| `libbthook.so` (preloaded into the stock btstack by the `btstack` wrapper) | Bluetooth stack | RFCOMM channel for iAP2, iAP2 and CarPlay SDP records (the CarPlay UUID then appears in the advertisement by itself); bridges the channel to `wcpd` (`127.0.0.1:57342`); opens iAP2 from the car when the car connected the phone. The wrapper also starts `wcp-boot.sh` once per boot. |
 | `wcpd` | own daemon | Bluetooth iAP2: MFi authentication, identification, Wi-Fi credentials (AP config read when it appears), `CarPlayStartSession` once the receiver listens (`/tmp/wcp_go`); starts `dio_manager` on demand (`dio-up.sh`) and offers CarPlay to the HMI (`/tmp/wcp_session`) once it is ready, never during USB CarPlay; offers again if no receiver comes up within 20 s, never re-offers during a running session; closes the Bluetooth iAP2 link if the phone keeps it open 8 s into a session; follows the access point's station events (`sloginfo -w`) and flags a phone that leaves the Wi-Fi (`/tmp/wcp_phone_gone`) |
 | `wcppaird` | own daemon | receiver identity (Ed25519), Pair-Setup / Pair-Verify, MFi coprocessor |
 | `libwcpstart.so` | preloaded into `dio_manager` | encryption of all channels, stream and audio adaptation (relay, decoding, pacing), the in-session iAP2 channel for the stock iAP2 client, the event-channel request queue, the startup-timeout redirect, the `/tmp/wcp_go` gate, the phone watchdog, diagnostics |
@@ -92,6 +93,10 @@ The design follows what an iPhone log from a factory wireless unit (Audi MMI, Al
 | 19 | The car's Bluetooth address in the identification was a hard-coded `2C:DC:AD:4C:64:CF`; the real one (iPhone log, stock Bluetooth service, the chip) is `2C:DC:AD:4C:64:0F`. The stack keeps it at `bt+0x1B4C` (`bt` = 0x2DA0EC), filled at a varying time (10 s or \~41 s). | libbthook sends HCI `Read_BD_ADDR` through the stack's `ME_SendHciCommandAsync` with a token of its own (reply at token `+0x38`: `01 09 10 00` + address), else takes the stack's copy; writes `/tmp/wcp_btmac`; `wcpd` and the `wcp` module read it. `BTMAC` in `wcp.conf` only as an override. |
 | 20 | `rename()` of a temp file in `/tmp` (`/dev/shmem`) failed silently on the car. | State files in `/tmp` are written in place with one write. |
 | 21 | `AltScreen.sh start` (4 s: unpack 2.3 MB, copy 2 MB of stock binaries, directory scan) ran before the stock service manager, delaying every service. | Option A: unpack and stock copies once at install into `/mnt/ota/altscreen/root` (stock copies as `stock/<name>`, so process names stay stock; reused while unchanged; refreshed if the firmware brings a newer one); boot only links (`links.txt`). Wireless CarPlay files live in the same tree and are linked file by file into `/mnt/ota/wcp`, which keeps only data (`pair/`, `wcp.conf`, markers, logs). |
+| 22 | Music dropped briefly just before every navigation prompt, then lowered as expected. The stock's music buffer ran empty (`Main: Re-buffering: 0 ms buffered`) because its audio receive thread, which reads all audio sockets, was blocked \~390 ms: on its first read of the new prompt socket our hook fetched the stream keys from `wcppaird` in that thread (\~195 ms each). Earlier the relay also held its lock during the same fetch, so the music pacer stopped sending for \~400 ms. | Stream keys fetched once, at the SETUP, outside any lock and outside the stock's threads, and kept in a cache. Since then no re-buffering at prompts. The 500 ms prompt lead-in (a workaround for the same wait) is discarded by the stock now and is off by default. RTP sequence to the stock starts at 1. |
+| 23 | A newly paired iPhone connected and disconnected every \~20–30 s (after its first session). Each session ended right after the phone's iAP2 inside the session started sending its list updates (call history / favourites, `0x4171`): the hook logged `request too large` and dropped the control connection, the stock code saw `ECONNRESET`. One `iAPSendMessage` carries one whole iAP2 packet — up to 65 535 bytes plus plist and header — and the hook's request buffer was 64 KB. The first test phone's lists are short enough. (The first suspects, the Bluetooth link closing at 8 s and the phone's `disableBluetooth`, only happened at the same moment.) | Request buffer 512 KB; reproduced on the host with a 65 535-byte iAP2 packet (fails with 64 KB, passes now). Kept from the investigation: `wcpd` closes a still-open Bluetooth iAP2 link only 5 s after the iAP2 inside the session is authenticated; holding `disableBluetooth` until then is available as `WCP_HOLD_DISABLE_BT=1` (default: passed at once, as before). |
+| 24 | After a clean-up of `/mnt/ota/wcp` the phones connected over Wi-Fi, passed pair-verify, then sent nothing (no SETUP); CarPlay never came. The pairing folder `/mnt/ota/wcp/pair` had been lost with the clean-up: `wcppaird` created a new car identity at the next boot (pi `A229FAB4…` → `B8687833…`), which the phones did not match with the car they knew. | Each phone: Forget This Car (+ Bluetooth), pair again → CarPlay \< 40 s after boot with both phones again. **If `pair/` is ever deleted, every phone must be re-paired.** Never delete it; back it up after pairing a new Apple ID (`tar -czf /mnt/ota/wcp_pair_backup.tgz -C /mnt/ota/wcp pair`). Phones on the same Apple ID share one `peer-…` file. |
+| 25 | A second session in the same `dio_manager` (after one ended by the phone watchdog) was ended 0.16 s after it started ("phone silent for 92915 ms"): the watchdog read the last-packet time before its 250 ms sleep and told sessions apart by fd number, which the new session reused. | Watchdog: a session counter, each session counts from when it is first seen, last-packet time read after the sleep. Reproduced and fixed on the host. |
 
 ### Audio findings (unchanged)
 
@@ -136,21 +141,24 @@ On the car, with car logs (`wcpd.log`, `wcphook.log`, `dio_trace.log`, `sloginfo
 
 | Item | Notes |
 | --- | --- |
-| **Install with the new AltScreen.sh** | Build the pack with `create_tar.bat` (`manifest.txt` + `manifest_wcp.txt`; runtime libraries copied once from the car into `wcp_runtime/`; new `dio_manager` and `gal` wrappers in `support/`), `AltScreen.sh install`, reboot. Check: `/tmp/AltScreenStarted` `seconds=0/1`, `AltScreen.sh check`, `ls -l /mnt/ota/wcp` (code = links), `wcp-boot.sh status`. Then delete the old real files in `/mnt/ota/wcp` (`btstack`, `libopus_wcp.a`, `wcp-test.sh`…`wcp-test3.sh`, `drop.tar`). |
-| Flash back to stock | Once the overlay runs: copy `/eso/bin/apps/stock/btstack` back over `/eso/bin/apps/btstack`, remove `stock/` from flash (the overlay links the wrapper). |
-| Boot time | Stock \~16 s to the first screen, with the mods 20–25 s, sometimes 40 s. Compare a fast and a slow boot after the new start (`sloginfo` `BENCH_Startup`, `AltScreen_boot.log`). Optional: shorter wait (1 s) before the car opens iAP2 for a known iPhone; early connect at stack start behind a marker. |
-| USB hand-over | The insert is now in the pack's `dio_manager` wrapper. Car tests: USB phone with no wireless (stock), USB plugged in during wireless (wireless instance gives way), wireless after a USB session. |
-| Firewall | A proper rule set for the CarPlay ports on `uap0` (no disabling of the packet filter). |
-| HMI bridge | Rebuild `AltScreenQ_wcp.jar` with the logging change (`DEBUG_LOG` constant). |
-| Microphone quality | Our Opus encoder runs at 24 kbit/s, complexity 5 (CPU choice); 32 kbit/s / complexity 8 would cost \~2–3 ms per 20 ms frame. |
+| **Install with the new AltScreen.sh** | ✅ installed and verified (31 links, start in 0 s). Left: delete the old real files in `/mnt/ota/wcp` that the pack now provides as links or no longer needs (`btstack`, `libopus_wcp.a`, `wcp-test.sh`…`wcp-test3.sh`, `drop.tar`), if not done yet. |
+| **Cluster map blink at route start / end** (iOS 26 iPhone) | The phone redraws the whole cluster picture on every scene change (`showUI`); the scene was switched at every route start and \~5 s after every route end. Fix (RGI jar + libcpproxy, built against the v2.2 tree): the scene follows the menu "Route Guidance on Cluster" for the whole session, and the cluster's `initialURL` in /info matches the last scene (`/tmp/cpproxy_scene`). Compile- and host-tested; **car test pending** (both phones: route start / end, menu toggle, session start). |
+| Flash | ✅ stock — the btstack wrapper is linked by the overlay only |
+| Boot time | ✅ done: ≤ 15 s to the first screen with all mods (stock \~16 s). Optional: shorter wait (1 s) before the car opens iAP2 for a known iPhone; early connect at stack start behind a marker. |
+| USB and wireless (behaviour, 26 Oct) | ✅ **Phone in wireless CarPlay, USB plugged in:** the phone charges, CarPlay stays wireless (the car starts USB CarPlay, it ends again after \~8 s while the car's Bluetooth iAP2 is open; the wireless session comes back). **Phone's Bluetooth and Wi-Fi off, USB plugged in:** USB CarPlay. **USB unplugged:** wireless CarPlay resumes by itself — libbthook opens iAP2 3 s after the USB session ended (`bthook_nousbresume` switches that off). Option if USB should always win: no car-initiated iAP2 while a USB session runs. Still to test: a USB-only phone with no wireless. |
+| Firewall | ✅ pf stays enabled. The CarPlay ports on `uap0` are passed by a block inserted above the stock `block in quick on $wlan_if from any to ($wlan_if)`, in `pf.conf`, `pf.ecm0.conf`, `pf.mlan0.conf` (verified on the car) and `pf.ppp0.conf` (the mobile-data rule set; `pfctl` can only check it while `ppp0` is up, so it is accepted when the unchanged file fails the same way). Part of `AltScreen.sh fixfw` / `install` / `checkfw`. |
+| HMI bridge | ✅ the logging scheme (`DEBUG_LOG` constant + marker) is in `WirelessCarPlayBridge` of the v2.2 tree (AltScreenQ_patch). |
+| Microphone quality | Raised to 32 kbit/s, complexity 8 (was 24 kbit/s, 5); the slowest encode per 500 packets is logged. `WCP_MIC_BITRATE` / `WCP_MIC_COMPLEXITY` set other values (old: 24000 / 5). Car test pending (a call: voice at the other end, CPU). |
+| Session recovery (25 s) | Now depends on the access point: `wcpd` tracks the stations on the car's Wi-Fi (`uaputl sta_list` + STA_ASSOC / DEAUTH events). Phone not on the Wi-Fi → no `dio_manager` restart, it waits; phone joined late → the 25 s count from the moment it joined; state unknown → as before. Car test pending (e.g. phone Wi-Fi off, phone locked at the first connection). |
+| Crash watch | `AltScreen.sh` follows the dumper's core files (`/mnt/ota/system/core`): two crashes of btstack, dio_manager (USB / wireless separately), gal, maneuver_render or altscreen_present within 10 min → our part in it off until reboot (its existing `/tmp` off switch); `j9` (HMI) → `.sf_disable` + overlay stopped at once. Host-tested; car test pending (`AltScreen.sh check` shows it running). |
+| start-ap.sh | In the pack now (linked over `/eso/telephone/start-ap.sh`); the stock script goes back on flash. |
 | Alerts on type 100 | Only Opus 48 kHz **mono** is offered as compressed format for `alert`/`default` (not seen in use); AAC-LC stereo could be added. |
-| PHONE hard key | Stock (USB): the key opens the MMI's phone app, which says to use CarPlay. Wireless now: the first press opens CarPlay, later presses the MMI's phone app. Nice to have: with CarPlay active, always open CarPlay. Needs the HMI's `de.audi.app.terminalmode.smartphone.HardKeyDSIListener` (from `lsd.jar`). |
 | `IPOD_AP2_PPSSERVICE` | `enqueueSingleMessage failed … thread not available` at every connect; check whether the MMI's own media screens and the cluster show titles outside CarPlay. |
 | One-off | Once, on the first connection of a run, CarPlay ended together with Bluetooth; starting it from the MMI worked, not reproduced since. Capture the hook and `dio_manager` trace if it recurs. |
 | Bluetooth app | Crashed once earlier (NULL string in its OBEX authentication handling) after a session drop; reproduce and guard. |
-| Long-run checks | Pacer drift over 30+ minutes, memory, many reconnect cycles, ignition cycles. |
 | Cosmetic | The HMI shows the phone twice during start-up (Bluetooth phase, then session phase). |
 | Release build | Once stable: `set DEBUG_LOG=0` in `build_wcp.bat` (no log code at all). |
+| Prompt start delay (optional) | The SETUP reply for a prompt waits \~0.4 s for its two stream keys from `wcppaird` (\~195 ms each). Acceptable as is; could be cut by a faster key request in `wcppaird` or by deriving the keys in the hook from the session secret. |
 
 ### Audio quality over Wi-Fi
 
@@ -159,7 +167,7 @@ On the car, with car logs (`wcpd.log`, `wcphook.log`, `dio_trace.log`, `sloginfo
 | Music (stream 102) | AAC-LC 48 kHz stereo from the phone (its log: 128 kbit/s CBR or 192 kbit/s VBR), decoded to PCM 48 kHz stereo | compressed by the phone — inherent to wireless CarPlay; nothing lowered by us |
 | Calls, Siri (stream 100) | Opus 16 kHz mono → PCM 16 kHz | same bandwidth: the stock receiver offers only 16 kHz mono for voice |
 | Navigation prompts (stream 101) | Opus 16 kHz mono → PCM 16 kHz | same: the stock alt-audio list is 16 kHz mono only |
-| Microphone (car → phone) | our Opus encoder 16 kHz mono, 24 kbit/s, complexity 5 | the one setting chosen by us (CPU); can be raised |
+| Microphone (car → phone) | our Opus encoder 16 kHz mono, 32 kbit/s, complexity 8 | the one setting chosen by us; was 24 kbit/s, complexity 5 |
 
 ---
 
@@ -180,11 +188,14 @@ Build: `build_wcp.bat` (`set DEBUG_LOG=0` for a release without log code) → `l
 | --- | --- |
 | `/mnt/ota/app/debug_wificp` | every component writes its log (DEBUG_LOG=1 builds) |
 | `/mnt/ota/app/debug_wificp_raw` | with the above: raw dumps too |
-| `/mnt/ota/.sf_disable` | boot hook starts nothing (all mods off; `sf_disable` on SD/USB creates it) |
-| `/mnt/ota/wcp/bthook_off` | btstack runs stock, no daemons at boot |
-| `/mnt/ota/wcp/bthook_test` | libbthook only logs, registers nothing |
-| `/mnt/ota/wcp/bthook_noask` | libbthook does not ask the chip for the address (stack's copy only) |
-| `/mnt/ota/wcp/wcp_noboot` | daemons not started at boot |
+| `/mnt/ota/app/.sf_disable` | boot hook starts nothing (all mods off; `sf_disable` on SD/USB creates it) |
+| `/mnt/ota/app/bthook_off` | btstack runs stock, no daemons at boot |
+| `/mnt/ota/app/bthook_test` | libbthook only logs, registers nothing |
+| `/mnt/ota/app/bthook_noask` | libbthook does not ask the chip for the address (stack's copy only) |
+| `/mnt/ota/app/bthook_nousbresume` | libbthook does not open iAP2 when a USB CarPlay session ends |
+| `/mnt/ota/app/wcp_noboot` | daemons not started at boot |
+
+All control files are in `/mnt/ota/app` (full list: technical reference, section 10); `AltScreen.sh check` lists the ones that are set, each with what it is for.
 
 | Switch | Default | Effect |
 | --- | --- | --- |
@@ -197,7 +208,7 @@ Build: `build_wcp.bat` (`set DEBUG_LOG=0` for a release without log code) → `l
 | `WCP_AP_WATCH` | on | 0: `wcpd` does not follow the access point's station events |
 | `WCP_BT_DROP_MS` | 8000 | `wcpd` closes a Bluetooth iAP2 link still open this long into a session; 0 = off |
 | `WCP_REOFFER_MS` | 20000 | `wcpd` offers CarPlay to the HMI again if no receiver came up |
-| `WCP_102_TARGET`, `WCP_102_BUFFER`, `WCP_102_OPENLOOP`, `WCP_101_LEADIN` | 150 ms, 600 ms, off, 500 ms | music pacing and prompt lead-in |
+| `WCP_102_TARGET`, `WCP_102_BUFFER`, `WCP_102_OPENLOOP`, `WCP_101_LEADIN`, `WCP_102_BOOST` | 150 ms, 600 ms, off, 0 ms, 0 ms | music pacing, prompt lead-in, extra music margin around a prompt's SETUP |
 
 Logs (with the marker): `/tmp/wcpd.log` (Bluetooth iAP2, Wi-Fi setup, on-demand start), `/tmp/bthook.log` (Bluetooth stack), `/tmp/wcphook.log` (session, iAP2 inside it, audio relay), `/tmp/wcpstart.log`, `/tmp/wcppaird.log`, `/tmp/dio_trace.log` (`dio_manager`), `/tmp/wcp_hmi.log` (HMI bridge), `/tmp/wcp_dio_up.log` (dio_manager starts, USB hand-over), `/tmp/wcp_boot.log`. `/tmp/rgi_hook.log` (Identify) follows the RGI framework (`debug_hook`).
 
