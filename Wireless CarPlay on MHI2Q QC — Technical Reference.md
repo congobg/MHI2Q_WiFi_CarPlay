@@ -1,8 +1,8 @@
 # Wireless CarPlay on MHI2Q QC — Technical Reference
 
-Companion to `PROJECT_STATUS.md`. Unit: MHI2Q QC (mmx2qc), rel/CLU7, QNX 6.5.0 ARMv7, firmware 3638 / MU0917. Stock CarPlay receiver: AirPlay 210.81 in `dio_manager`.
+Companion to `PROJECT_STATUS.md`. Unit: MHI2Q QC (mmx2qc), rel/CLU7, QNX 6.5.0 ARMv7, firmware 3638 / MU0917 and 5092 (MHI2Q_ER_AUG22_P5092), both initially tested. Stock CarPlay receiver: AirPlay 210.81 in `dio_manager`. One set of wireless binaries for both firmwares: the firmware-specific data are build tables, picked at run time (§14).
 
-**Last update:** 2026-10-25 — libbthook, car-initiated iAP2, `dio_manager` on demand, boot start, event-channel pump, logging markers.
+**Last update:** 2026-10-27 — 5092 support (iAP2 client start, Bonjour), Wi-Fi channel from the running access point, keep-alive as session activity for the stock idle timer, crash watch by snapshot, Wi-Fi switch-on from the HMI, three parts / one pack.
 
 ---
 
@@ -27,25 +27,35 @@ The design follows a factory wireless unit (Audi MIB2+):
 | `wcp-boot.sh` | shell | starts `wcppaird` and `wcpd` (`start/stop/restart/status`) |
 | `wcpd` | daemon | Bluetooth iAP2, Wi-Fi credentials, `dio_manager` on demand, offer to the HMI, `CarPlayStartSession`, recovery, access-point watch |
 | `wcppaird` | daemon | receiver identity (Ed25519), Pair-Setup / Pair-Verify, MFi coprocessor |
-| `dio-up.sh` | shell (called by `wcpd`) | starts `dio_manager` in wireless mode through its wrapper, unless one runs |
+| `dio-up.sh` | shell (called by `wcpd`) | starts `dio_manager` in wireless mode through its wrapper, unless one runs; starts mdnsd (Bonjour) first when none runs (5092's `dio_manager` only starts it for USB) |
 | `dio_manager` wrapper + insert `dio_manager.wcp.inc` | shell (started by smartphone_integrator or `dio-up.sh`) | preloads librgi_hook, libcpproxy, libwcpstart; records `usb`/`wireless`; stops a wireless instance when a USB phone needs `dio_manager` |
 | `libwcpstart.so` | preloaded into `dio_manager` | everything on Wi-Fi (§6, §8); passive for USB |
 | `librgi_hook.so` (`wcp` module) | `dio_manager` | wireless parts of the Identify, Wi-Fi request; no StartSession inside the session |
 | `libcpproxy.so` | `dio_manager` | cluster stream (type 111) over Wi-Fi without the legacy AES setup |
-| `AltScreenQ_wcp.jar` | HMI (Java) | virtual CarPlay device 200, connect/disconnect, session state to the HMI |
-| AP overlay (`start-ap.sh`) | access point start | HT20, channel 6, Apple vendor element |
+| `WCP.jar` (`WirelessCarPlayBridge`, `WlanAutoOn`) | HMI (Java) | virtual CarPlay device 200, connect/disconnect, session state to the HMI (SI's DSI filtered through a dynamic proxy, so one source fits 3638 and 5092); switches the car's Wi-Fi on when `/mnt/ota/app/wcp_wifi_on` asks for it |
+| AP overlay (`start-ap.sh`) | access point start | HT20, channel 6 (`WCP_CHANNEL` in `wcp.conf`), Apple vendor element built from this car's Bluetooth and AP MAC (`/mnt/ota/wcp/btmac.last` keeps the address for the next boot) |
 
 `libwcpstart.so` sources:
 
 | File | Content |
 | --- | --- |
-| `wcpstart.c` | constructor, start order, interface `carplay0 → uap0`, Bonjour, `/tmp/wcp_dio_ready` |
-| `wcphook.c` | socket interposers, encryption, request/reply adaptation, `/info`, keep-alive, iAP2 inside the session, event-channel pump, watchdog, startup-timer redirect, audio relay + pacer, diagnostics |
+| `wcpstart.c` | constructor, `dio_manager` build table, start order, interface `carplay0 → uap0`, Bonjour TXT, `/tmp/wcp_dio_ready`, iAP2 client start (5092) |
+| `wcphook.c` | socket interposers, encryption, request/reply adaptation, `/info`, keep-alive (+ activity for the stock idle timer), iAP2 inside the session, event-channel pump, watchdog, startup-timer redirect, audio relay + pacer, diagnostics |
 | `wcpaead.c` | ChaCha20-Poly1305 |
 | `wcpplist.c / .h` | binary plist reader / writer (root-first layout) |
 | `wcpaac.c / .h` | AAC-LC → PCM through the unit's Cinemo codec |
 | `wcpopus/` | fixed-point libopus 1.4 (symbols hidden) |
 | `wcpdebug.h` | logging switch shared by all components (§9) |
+
+### Three parts, one or two packs
+
+| Part | Manifest | Contents | Off switch |
+| --- | --- | --- | --- |
+| AltScreen (phone map in the cluster) | `manifest_alt.txt` | libcpproxy, vidcp, libaaproxy, vidaa, gal wrapper | `altscreen_off` |
+| RGI (route guidance in the cluster) + shared files | `manifest_rgi.txt` | librgi_hook, maneuver_render, renderer supervisor, shaders, RGI.jar, AltScreen.jar, dio_manager wrapper, `zipget` | `rgi_off` |
+| Wireless CarPlay | `manifest_wcp.txt` | btstack wrapper + libbthook, libwcpstart, wcpd, wcppaird, scripts, start-ap.sh, WCP.jar | `wcp_off` |
+
+`create_tar.bat` makes one `AltScreen.tar.gz` with all three parts (default); `create_tar.bat both` makes `AltScreen.tar.gz` (AltScreen + RGI) and `wcp.tar.gz` (RGI + wireless). `AltScreen.sh` assigns each linked path to a part by location (`feature_of`) and writes the parts that are on to `/tmp/.sf_features` (`v3 altscreen rgi wcp`). Without AltScreen the HMI keeps the stock cluster map (`GALHandler.isSmartphoneClusterEnabled()` false, no "Smartphone Cluster" menu item, `ClusterSceneLink` silent). `TerminalModeActivator` is compiled from one source into AltScreen.jar and WCP.jar and creates `AndroidAutoAutoLaunchHandler` / `WirelessCarPlayBridge` by name only if installed. The dio_manager wrapper preloads libcpproxy with AltScreen, librgi_hook with RGI (`RGI_MODULES=wcp` — only the wireless module — when RGI is off or `/tmp/rgd_disable` is set), libwcpstart with the wireless part.
 
 ---
 
@@ -89,8 +99,10 @@ reboot
 | Boot | The boot hook (servicemgrmibhigh) runs `AltScreen.sh start`: links only (`ln -sP` per line of `links.txt`, stock copies refreshed if the firmware brought newer ones), then the RGI renderer supervisor and `wcp-boot.sh start` in the background (it waits for `/dev/i2c8`). The connectivity launcher then starts `btstack` (the linked wrapper): stock btstack + libbthook; the wrapper also calls `wcp-boot.sh start` (a lock lets only one run). |
 | `wcp-boot.sh start` | `kern.sbmax=1048576`, `/tmp/wcp_btmac` only if `BTMAC` is configured, session file `DISCONNECTED`, then `wcppaird` and `wcpd` (`WCP_START=1`, `WCP_GATE=/tmp/wcp_go`, `WCP_DIO_UP=dio-up.sh`). No `dio_manager`. |
 | iPhone on Bluetooth | libbthook opens iAP2 if the phone does not (4 s); `wcpd` gets `phone link up` and runs `dio-up.sh` (head start). |
-| `CarPlayAvailability` | `wcpd` waits for `/tmp/wcp_dio_ready`, then writes `AVAILABLE`; the HMI lists device 200 and connects; the receiver listens (`/tmp/wcp_go`); `wcpd` sends `CarPlayStartSession`. |
-| Session | Wi-Fi, pairing, encrypted channels, iAP2 inside the session, Bluetooth released (§6). |
+| `dio-up.sh` | mdnsd started if none runs; `dio_manager` started through its wrapper in wireless mode. |
+| `CarPlayAvailability` | `wcpd` waits for `/tmp/wcp_dio_ready`, then writes `AVAILABLE`; the HMI lists device 200 and connects; the receiver listens (`/tmp/wcp_go`) — on 5092 the hook now posts the iAP2 client's connect job (Cinemo opens its device \~13 s later); `wcpd` sends `CarPlayStartSession`. |
+| Session | Wi-Fi (credentials with the running access point's channel), pairing, encrypted channels, iAP2 inside the session, Bluetooth released (§6). |
+| HMI start | `WlanAutoOn`: if `/mnt/ota/app/wcp_wifi_on` exists, role access point + radio on through `DSIWLAN` (once, or every start with `always`). |
 | Session end | `dio_manager` re-enables Bluetooth and exits; the car reconnects the phone over Bluetooth; the next connection starts a new `dio_manager`. |
 | USB iPhone | smartphone_integrator starts the wrapper (no `WCP_DIO_WIRELESS`): a running wireless instance is stopped first; `/tmp/wcp_dio_mode` = `usb <pid>`; `wcpd` neither starts nor offers wireless until it ends. Seen on the car: with the phone in wireless CarPlay, plugging in only charges it — the USB session ends after \~8 s and wireless comes back; with the phone's Bluetooth and Wi-Fi off, USB CarPlay runs. |
 | USB unplugged | libbthook sees the USB `dio_manager` gone (`/tmp/wcp_dio_mode`, checked once a second) and opens iAP2 to the phone 3 s later; wireless CarPlay resumes (`bthook_nousbresume` switches it off). |
@@ -138,7 +150,11 @@ btstack's code is mapped from flash and cannot be written at runtime, so libbtho
 | Event-channel pump | The stock code reads the event channel only while it waits for its own reply. Whenever a stock thread waits in `select()` without the event socket, the hook adds it and reads and decrypts it itself; data for the stock stays in its buffer and `select()` reports it readable as soon as the stock waits for it. One reader at a time. |
 | Startup timer | `dio_manager` ends a session 6 s after iAP2 connects unless the session start stops the timer — reversed order over Wi-Fi. The GOT entry of `s_sessionStartupTimerHandler` (`0x1937a0`) points to the hook, which ignores the timeout while a session with iAP2 inside runs. |
 | Bluetooth | `disableBluetooth` from the phone goes to the stock code (Bluetooth released); `wcpd` closes a Bluetooth iAP2 link still open 8 s into a session. |
-| Phone gone | `wcpd` follows the access point (`sloginfo -w`): `STA_DEAUTH`/`DISASSOC` of the phone → `/tmp/wcp_phone_gone` → the hook shuts the control connection within 0.25 s. Fallback: 5 s without any traffic from the phone. |
+| Phone gone | `wcpd` follows the access point (`sloginfo -w`): `STA_DEAUTH`/`DISASSOC` of the phone → `/tmp/wcp_phone_gone` → the hook shuts the control connection within 0.25 s. Fallback: 5 s without any traffic from the phone (15 s while it is still on the Wi-Fi). |
+| Wi-Fi credentials | `wcpd` reads the access point config again for every `0x5702` and sends the channel `uaputl sys_config` reports (it once sent the stock config's 11 while the AP ran on 6). |
+| Bonjour | `_airplay._tcp` registered by the stock code through mdnsd; the hook adds `pi` / `pk` and the feature bits to the TXT record (logged when it changes, with the register result). mdnsd from `dio-up.sh` when the firmware has not started it. |
+| iAP2 client start (5092) | `dio_manager` 5092 connects Cinemo only for a USB iPhone. When the receiver starts listening, the hook calls `CDIOManager::iAP2Connect()`; if that returns 0 (no `CSIService` in a wireless instance), it posts the connect job itself: config string `iap2.device` (key 10) → `UnicodeString8` → iAP2 service connect (`CDIOManager+0xE8`). No second job within 30 s. |
+| Stock idle timer | 210.81 ends a session after 30 s without received audio or activity (`sessionDied`). With only keep-alive beacons arriving (car has the screen, no audio) each beacon adds 1 to activityCount (session `+0x1f0`); the session is held with `CFRetain` from `AirPlayReceiverSessionStart` to its end. Only where the idle check matches the verified code (§14). |
 
 ---
 
@@ -230,6 +246,11 @@ All control files (markers, settings, tuning values) are in `/mnt/ota/app` (olde
 | `/mnt/ota/app/…` | `check` says | Effect |
 | --- | --- | --- |
 | `.sf_disable` | all mods off (boot hook) | the boot hook starts nothing (`sf_disable` on SD/USB at boot creates it; its path is written into the hook by `install`); also written by the crash watch after an HMI crash loop. Delete it to turn the mods back on |
+| `altscreen_off` | AltScreen CarPlay off (stock cluster) | from the next start the AltScreen part's paths stay unlinked (stock cluster, gal, no route guidance); wireless CarPlay keeps running |
+| `rgi_off` | RGI part off (no route guidance) | from the next start the RGI part stays unlinked (stock cluster arrows); AltScreen.jar and `hmi/lib` stay linked while another part needs them |
+| `wcp_wifi_on` | Wi-Fi switched on by the HMI | empty: WCP.jar switches the car's Wi-Fi on (access point, radio on) at the next HMI start, then removes the file; `always`: at every start. Written by `install` when the wireless part is installed |
+| `wcp_off` | wireless CarPlay off (stock BT/Wi-Fi) | from the next start the wireless part's paths stay unlinked (stock btstack, stock start-ap.sh, no daemons, no WCP.jar); AltScreen keeps running |
+| `hmi_startup_off` | stock HMI startup file (20 s wait) | from the next start `/mnt/app/eso/hmi/lsd/hmi_startup.json` is not linked: the HMI uses the copy in its jar again (with CarPlay as the last audio source, the start waits 20 s for the media domain) |
 | `debug_wificp` | wireless CarPlay logs on | `/tmp/wcphook.log`, `wcpd.log`, `bthook.log`, `wcpstart.log`, `wcppaird.log`, … (DEBUG_LOG=1 builds) |
 | `debug_wificp_raw` | plus raw dumps | with the above: hex dumps |
 | `debug_hook` | hook and renderer logs | `librgi_hook`, `maneuver_render` |
@@ -264,6 +285,7 @@ All control files (markers, settings, tuning values) are in `/mnt/ota/app` (olde
 | `cpproxy_disable` | cluster (libcpproxy) off | by hand or the crash watch: `dio_manager` without libcpproxy |
 | `aaproxy_disable` | AA cluster (libaaproxy) off | by hand or the crash watch: `gal` without libaaproxy |
 | `wcp_dio_off` | wireless dio_manager not started | crash watch: `dio-up.sh` starts no wireless `dio_manager` |
+| `.sf_features` | – | written by `AltScreen.sh start`: the parts installed and switched on (`altscreen`, `wcp`); read by the dio_manager wrapper |
 | `rgi_passive` | RGI hook only logs | as the `/mnt/ota/app` one, for this boot |
 | `rgi_java_nodefer` | CarPlay modules start immediately | as the `/mnt/ota/app` one, for this boot |
 | `bthook_off` | Bluetooth hook off, stock | by hand or the crash watch: stock btstack from its next start |
@@ -271,7 +293,7 @@ All control files (markers, settings, tuning values) are in `/mnt/ota/app` (olde
 | `bthook_registering` | – | set by libbthook while it registers; present after a crash during registration → the library stays inactive until reboot |
 | `wcp_boot_started` | – | the daemons are started once per boot, not again when the launcher restarts btstack (not a crash guard) |
 
-**Crash watch** (`AltScreen.sh`, started by `start`, `SF_CRASHWATCH=0` = off). The system's dumper leaves a core file in `/mnt/ota/system/core` for every process that dies of a fault (`<name>.core.gz`, repeats numbered `<name>.N.core.gz`, 0 bytes with `-m`); normal exits, `slay` and launcher restarts leave none. The watcher checks that directory every 10 s (a file newer than its stamp = a crash). Two crashes of the same program within 10 min switch our part in it off; its next start runs stock:
+**Crash watch** (`AltScreen.sh`, started by `start`, `SF_CRASHWATCH=0` = off). The system's dumper leaves a core file in `/mnt/ota/system/core` for every process that dies of a fault (`<name>.core.gz`, repeats numbered `<name>.N.core.gz`, 0 bytes with `-m`); normal exits, `slay` and launcher restarts leave none. The watcher checks that directory every 10 s against a snapshot (name, size, time) taken at its start: a crash is a core file that is new or changed afterwards, counted once it has stopped changing, once per program per poll. (Not by time stamps: the clock starts at 1 Jan 1970 at every boot, so an old core file can look newer than anything written in this boot.) Two crashes of the same program within 10 min switch our part in it off; its next start runs stock:
 
 | Program | Marker (reason inside) | Effect |
 | --- | --- | --- |
@@ -301,7 +323,7 @@ All control files (markers, settings, tuning values) are in `/mnt/ota/app` (olde
 | `WCP_REOFFER_MS` | 20000 | offer CarPlay again if no receiver came up |
 | `WCP_BT_DROP_MS` | 8000 | close a Bluetooth iAP2 link still open this long into a session; 0 = off |
 | `WCP_AP_WATCH` | on | 0: do not follow the access point's station events |
-| `WCP_CFG` | `/tmp/uaputl_wcp.cfg` | access point configuration (SSID, passphrase, channel) |
+| `WCP_CFG` | `/tmp/uaputl_wcp.cfg`, then `/tmp/uaputl.cfg` | access point configuration (SSID, passphrase); read again for every credentials request; the channel comes from the running access point (`uaputl sys_config`) |
 | `WCP_IP`, `WCP_PORT`, `WCP_SRCVERS` | 10.173.189.1, 5000, 210.81 | receiver address and version in StartSession |
 | `WCP_NAME`, `WCP_MODEL`, `WCP_MANUF` | — | identification strings |
 | `WCP_PAIRID`, `WCP_PAIRDIR` | — | receiver pairing identity (shared with the hook and `wcppaird`) |
@@ -323,6 +345,10 @@ All control files (markers, settings, tuning values) are in `/mnt/ota/app` (olde
 | `WCP_IFACE` | `uap0` | receiver interface |
 | `WCP_NO_EV_PUMP` | off | 1: event-channel pump off |
 | `WCP_NO_IAP_RELAY` | off | 1: Cinemo's device is not redirected into the session |
+| `WCP_IAP_DIRECT` | on | 0: no direct connect job when `iAP2Connect()` returns 0 (5092) |
+| `WCP_KA_ACTIVITY` | on | 0: keep-alive beacons do not count as session activity for the stock idle timer |
+| `WCP_MDNSD` | on (`dio-up.sh`) | 0: `dio-up.sh` does not start mdnsd |
+| `WCP_DIO_CONFIG_DIR` | — | `dio-up.sh`: another directory with `dio_manager.json` (e.g. a Cinemo trace level) |
 | `WCP_PHONE_TIMEOUT_MS` | 5000 | end the session after this long without traffic from the phone; 0 = off |
 | `WCP_TRACE` | 768 | bytes of each message in a raw dump (with `debug_wificp_raw`); 0 = none |
 | `WCP_TRACE_PORT` | — | also dump connections to this port |
@@ -346,6 +372,8 @@ All control files (markers, settings, tuning values) are in `/mnt/ota/app` (olde
 
 ## 12. Build
 
+`build_all.bat` builds every component (AltScreenQ_patch, WCP.jar, `zipget`, libaaproxy, libcpproxy, maneuver_render, librgi_hook, RGI jar, vidbridge, `wcpbt`) and then the pack — use it, or run `create_tar.bat` after any single build, so the pack never falls behind the build. `wcpbt` is the same for 3638 and 5092 (one source, one set of binaries).
+
 `build_wcp.bat` (QNX 6.5.0 SDP in `C:\QNX650`):
 
 ```
@@ -353,7 +381,7 @@ build_wcp.bat                      DEBUG_LOG=1 (default)
 set DEBUG_LOG=0 & build_wcp.bat    release, no log code
 ```
 
-Output in `build\qnx\`: `libwcpstart.so`, `libbthook.so`, `wcpd`, `wcppaird`; the script checks that `libbthook.so` imports no `__sync` helper (`ntoarmv7-objdump -T libbthook.so | grep -i sync` must print nothing). `wcpopus/libopus_wcp.a` is built first (`make` or `build_win.bat` in `wcpopus/`). A clean build is needed whenever `wcpplist.h` changes. librgi_hook: `build_lib.bat` in its tree. HMI bridge: `build.bat` in `wcphmi_src`.
+Output in `build\qnx\`: `libwcpstart.so`, `libbthook.so`, `wcpd`, `wcppaird`; the script checks that `libbthook.so` imports no `__sync` helper (`ntoarmv7-objdump -T libbthook.so | grep -i sync` must print nothing). `wcpopus/libopus_wcp.a` is built first (`make` or `build_win.bat` in `wcpopus/`). A clean build is needed whenever `wcpplist.h` changes. librgi_hook: `build_lib.bat` in its tree. WCP.jar: `build.bat` in `wcp_hmi` (against the `*_final.jar` in `AltScreenQ_patch`).
 
 ---
 
@@ -407,3 +435,30 @@ Never start `dio_manager` by hand. A working connection in `wcpd.log`: `phone li
 | `AirPlayReceiverSessionMakeModeStateFromDictionary` | `0x22EE4` | mode changes |
 | `_AudioStreamSetProperty` | `0x4A0C0` | audio output properties |
 | `AirPlayReceiverSessionTearDown` call sites | `+0x2df6c` (session end), `+0x2fda4` (streams) | seen in the hook's diagnostics |
+
+**Firmware 5092** (same hardware; libbthook and libwcpstart pick the build at run time):
+
+| Item | 3638 | 5092 |
+| --- | --- | --- |
+| `btstack` | SHA-256 `31290e21…` | SHA-256 `bd0068b7…` |
+| Start-up check (startBtStack) | `0x11EFDC` `ldrb r3,[r5,#0x75C]` | `0x11ECD0` `ldrb r3,[r5,#0x764]` |
+| EIR hook point | `0x12C990` | `0x12A710` |
+| `RF_RegisterServerChannel` / `RF_DeregisterServerChannel` | `0x27C0BC` / `0x27C058` | `0x277B98` / `0x277B34` |
+| `SDP_AddRecord` / `SDP_RemoveRecord` / EIR refresh | `0x20AE24` / `0x20ADA4` / `0x1DF0A8` | `0x2073C4` / `0x207344` / `0x1DB648` |
+| `RF_RespondChannel` / `RF_CloseChannel` / `RF_SendData` / `RF_FrameSize` / `RF_AdvanceCredit` | `0x27B9E0` / `0x27BA9C` / `0x27B89C` / `0x27B718` / `0x27B800` | `0x2774BC` / `0x277578` / `0x277378` / `0x2771F4` / `0x2772DC` |
+| `CMGR_RegisterHandler` / `CMGR_CreateDataLink` / `CMGR_GetRemoteDevice` | `0x247C2C` / `0x247BE4` / `0x246D28` | `0x2436F4` / `0x2436AC` / `0x2427F0` |
+| `SDP_Query` / `SDP_ParseAttributes` / `RF_OpenClientChannel` | `0x1D4800` / `0x1D3E08` / `0x27BB68` | `0x1D0D88` / `0x1D0390` / `0x277644` |
+| `ME_SendHciCommandAsync` | `0x1DF720` | `0x1DBCC0` |
+| GOT: trace channels BTSERVICES / JOBS_STARTSERVICE, `bt` | `0x2C6134`, `0x2C6A94`, `0x2C619C` (`bt` = `0x2DA0EC`) | `0x2C112C`, `0x2C1A88`, `0x2C1194` (`bt` = `0x2D5104`) |
+| `dio_manager` | cksum 2268931283, 606693 bytes | cksum 1446556070, 691203 bytes |
+| vtable `CDIOManager` + 8 / slot of `onEvent_startAirPlay` | `0x191848` / slot 4 `0x191858` | `0x1A4848` / slot 5 `0x1A485C` |
+| `onEvent_startAirPlay` / `CAirPlayMainThread` ctor / thread start | `0x150018` / `0x14D3EC` / `0x167D24` | `0x15AF40` / `0x158B10` / `0x176B9C` |
+| operator new nothrow PLT / GOT `std::nothrow` / `"carplay0"` | `0x110EB0` / `0x1937A8` / `0x185634` | `0x1129C8` / `0x1A6BF0` / `0x19784C` |
+| CDIOManager: AirPlay thread / HID byte / touchpad / screen block | `+0x1B0` / `+0x1BC` / `+0x1B4` / `+0x2C0` | `+0x168` / `+0x174` / `+0x16C` / `+0x224` |
+| startup timer: vtable `CAirPlayMainThread` / GOT / handler | `0x191800` / `0x1937A0` / `0x148E0C` | `0x1A4818` / `0x1A6BE8` / `0x1546AC` |
+| `libairplay.so` | AirPlay 210.81, 753372 bytes | AirPlay 210.81, 763420 bytes (jitter buffer `+0x5E8/+0x5F0/+0x601` unchanged) |
+| iAP2 client start: `CDIOManager::iAP2Connect()` / service connect / config string / key / service offset | — (3638 connects by itself) | `0x155560` / `0x129468` / `0x12E104` / `10` / `CDIOManager+0xE8` |
+| mdnsd restart in `initService` | `CSmartphoneLauncherService::initService` → `0x14BBB0` | `CSIService::initService` → `0x157230` |
+| libairplay idle check (`ldr r2,[r4,#0x1ec]; ldr r3,[r4,#0x1e8]; cmp r3,r2; ldrne r2,[r4,#0x1f0]`) | `0x259D8` | `0x25F00` |
+| libairplay `sessionDied` call / `AirPlayReceiverSessionStart` / `TearDown` | — / `0x24DF0` / `0x265B0` | `0x25FCC` / `0x25278` / `0x26B60` |
+| TearDown call sites seen (5092) |  | `+0x30b14` (phone's TEARDOWN of streams), `+0x2ec4c` (session end after `sessionDied`) |
