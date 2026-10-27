@@ -222,3 +222,16 @@ Logs (with the marker): `/tmp/wcpd.log` (Bluetooth iAP2, Wi-Fi setup, on-demand 
 4. **Evidence first.** Car logs, `dio_manager`'s own trace and iPhone logs are read together; hypotheses are tested with switches before defaults change.
 5. **Host tests before car tests.** Every change runs against a fake stock receiver and a scripted phone on the PC and is cross-compiled for ARM before a car run.
 6. **Small, reversible steps.** New behaviour comes with a switch to turn it off and log lines that show it working.
+
+---
+
+## License
+
+This project is licensed under the **PolyForm Noncommercial License 1.0.0**.
+See the [`LICENSE`](LICENSE) file for the complete license terms.
+
+In summary, the license permits use, modification, and redistribution for noncommercial purposes, subject to the full license terms. Commercial use or distribution requires separate permission from the copyright holder. This summary does not replace the license text.
+
+**Copyright:** Replace the placeholder notice in `LICENSE` with your name or project copyright holder before publishing.
+
+This is an independent community project and is not affiliated with, endorsed by, or officially supported by Audi AG.
