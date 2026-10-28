@@ -217,10 +217,12 @@ touch /mnt/ota/app/debug_wificp_raw     # + raw dumps (hex, every iAP2 packet)
 Build: `build_all.bat` (every component, then the pack) or `build_wcp.bat` (`set DEBUG_LOG=0` for a release without log code) → `libwcpstart.so`, `libbthook.so`, `wcpd`, `wcppaird`; **then always `create_tar.bat`** → `AltScreen.tar.gz` (all mods). Before a car test, check that the car runs the new code:
 
 ```sh
-grep -c "count as session activity" /mnt/ota/wcp/libwcpstart.so   # 1 or more = idle-timer fix in
-grep -c "access point runs on channel" /mnt/ota/wcp/wcpd           # 1 = channel fix in
-grep -c MDNSD= /mnt/ota/wcp/dio-up.sh                              # 1 = mdnsd start in
+strings /mnt/ota/wcp/libwcpstart.so | grep -c "^AirPlayReceiverSessionStart$"   # 1 or more = idle-timer fix in
+strings /mnt/ota/wcp/wcpd | grep -c sys_config                                  # 1 = channel fix in
+grep -c MDNSD= /mnt/ota/wcp/dio-up.sh                                            # 1 = mdnsd start in (a script: plain grep)
 ```
+
+QNX's `grep` does not search binary files (`grep -c` on a `.so` gives 0 even when the text is there): for binaries always `strings <file> | grep …`. The checks above use names that are in debug and release builds alike (the new exported interposer, wcpd's `uaputl sys_config` command); log messages are only in `DEBUG_LOG=1` builds.
 
 | Marker | Effect |
 | --- | --- |
@@ -265,16 +267,3 @@ Logs (with the marker): `/tmp/wcpd.log` (Bluetooth iAP2, Wi-Fi setup, on-demand 
 4. **Evidence first.** Car logs, `dio_manager`'s own trace and iPhone logs are read together; hypotheses are tested with switches before defaults change.
 5. **Host tests before car tests.** Every change runs against a fake stock receiver and a scripted phone on the PC and is cross-compiled for ARM before a car run.
 6. **Small, reversible steps.** New behaviour comes with a switch to turn it off and log lines that show it working.
-
----
-
-## License
-
-This project is licensed under the **PolyForm Noncommercial License 1.0.0**.
-See the [`LICENSE`](LICENSE) file for the complete license terms.
-
-In summary, the license permits use, modification, and redistribution for noncommercial purposes, subject to the full license terms. Commercial use or distribution requires separate permission from the copyright holder. This summary does not replace the license text.
-
-**Copyright:** Replace the placeholder notice in `LICENSE` with your name or project copyright holder before publishing.
-
-This is an independent community project and is not affiliated with, endorsed by, or officially supported by Audi AG.
